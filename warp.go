@@ -41,11 +41,22 @@ type warpSession struct {
 
 func (s *warpSession) close() { s.dev.Close() }
 
+type dnsEntry struct {
+	v4, v6 []string
+	exp    time.Time
+}
+
 type Warp struct {
 	cfg  *Config
 	dir  string
 	sess atomic.Pointer[warpSession]
 	err  atomic.Value
+
+	mu     sync.Mutex
+	cancel context.CancelFunc
+
+	dnsMu sync.Mutex
+	dns   map[string]dnsEntry
 }
 
 func NewWarp(cfg *Config) *Warp { return &Warp{cfg: cfg, dir: cfg.DataDir} }
@@ -55,6 +66,13 @@ func (w *Warp) SupportsUDP() bool { return true }
 func (w *Warp) Ready() bool       { return w.sess.Load() != nil }
 func (w *Warp) LastError() string { s, _ := w.err.Load().(string); return s }
 func (w *Warp) Stop() {
+	w.mu.Lock()
+	cancel := w.cancel
+	w.cancel = nil
+	w.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	if s := w.sess.Swap(nil); s != nil {
 		s.close()
 	}
@@ -66,8 +84,51 @@ func (w *Warp) setErr(err error) {
 }
 
 func (w *Warp) Start(ctx context.Context) error {
-	go w.run(ctx)
+	cctx, cancel := context.WithCancel(ctx)
+	w.mu.Lock()
+	w.cancel = cancel
+	w.mu.Unlock()
+	go w.run(cctx)
 	return nil
+}
+
+// resolve looks a name up through the tunnel (cached for two minutes), IPv4 first: a dead IPv6
+// route must never eat the connect timeout before the working IPv4 address is tried.
+func (w *Warp) resolve(ctx context.Context, s *warpSession, host string) ([]string, error) {
+	w.dnsMu.Lock()
+	if e, ok := w.dns[host]; ok && time.Now().Before(e.exp) {
+		out := append(append([]string{}, e.v4...), e.v6...)
+		w.dnsMu.Unlock()
+		return out, nil
+	}
+	w.dnsMu.Unlock()
+	ips, err := s.tnet.LookupContextHost(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	var e dnsEntry
+	for _, ip := range ips {
+		a, perr := netip.ParseAddr(ip)
+		if perr != nil {
+			continue
+		}
+		if a.Is4() {
+			e.v4 = append(e.v4, ip)
+		} else {
+			e.v6 = append(e.v6, ip)
+		}
+	}
+	if len(e.v4)+len(e.v6) == 0 {
+		return nil, fmt.Errorf("no address for %s", host)
+	}
+	e.exp = time.Now().Add(2 * time.Minute)
+	w.dnsMu.Lock()
+	if w.dns == nil || len(w.dns) > 2000 {
+		w.dns = map[string]dnsEntry{}
+	}
+	w.dns[host] = e
+	w.dnsMu.Unlock()
+	return append(append([]string{}, e.v4...), e.v6...), nil
 }
 
 func (w *Warp) DialTCP(ctx context.Context, addr string) (net.Conn, error) {
@@ -75,7 +136,46 @@ func (w *Warp) DialTCP(ctx context.Context, addr string) (net.Conn, error) {
 	if s == nil {
 		return nil, errors.New("warp not connected")
 	}
-	return s.tnet.DialContext(ctx, "tcp", addr)
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	if _, perr := netip.ParseAddr(host); perr == nil {
+		return s.tnet.DialContext(ctx, "tcp", addr)
+	}
+	ips, err := w.resolve(ctx, s, host)
+	if err != nil {
+		return nil, fmt.Errorf("resolve %s: %v", host, err)
+	}
+	if len(ips) > 4 {
+		ips = ips[:4]
+	}
+	var last error
+	for _, ip := range ips {
+		if ctx.Err() != nil {
+			break
+		}
+		dctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		c, derr := s.tnet.DialContext(dctx, "tcp", net.JoinHostPort(ip, port))
+		cancel()
+		if derr == nil {
+			return c, nil
+		}
+		last = derr
+	}
+	if last == nil {
+		last = ctx.Err()
+	}
+	if last == nil {
+		last = fmt.Errorf("cannot connect to %s", addr)
+	}
+	return nil, last
+}
+
+// resetWarpIdentity forgets the registered free device and the last good endpoint.
+func resetWarpIdentity(dir string) {
+	os.Remove(filepath.Join(dir, "warp-identity.json"))
+	os.Remove(filepath.Join(dir, "warp-endpoint.txt"))
 }
 
 func (w *Warp) DialUDP(ctx context.Context, addr string) (net.Conn, error) {

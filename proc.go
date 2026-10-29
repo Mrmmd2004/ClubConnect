@@ -21,8 +21,9 @@ type proc struct {
 	bin    string
 	args   []string
 	env    []string
-	onLine func(line string) // called for each stdout/stderr line
-	onExit func()            // called when the process ends (before restart)
+	onStart func()            // called right before each launch
+	onLine  func(line string) // called for each stdout/stderr line
+	onExit  func()            // called when the process ends (before restart)
 }
 
 func (p *proc) run(ctx context.Context) {
@@ -32,6 +33,9 @@ func (p *proc) run(ctx context.Context) {
 		cmd := exec.CommandContext(ctx, p.bin, p.args...)
 		cmd.Env = append(os.Environ(), p.env...)
 		hideWindow(cmd)
+		if p.onStart != nil {
+			p.onStart()
+		}
 		so, _ := cmd.StdoutPipe()
 		se, _ := cmd.StderrPipe()
 		if err := cmd.Start(); err != nil {
@@ -74,8 +78,13 @@ func (p *proc) run(ctx context.Context) {
 
 // findBinary looks for a helper: explicit path, next to our executable, ./bin, then PATH.
 func findBinary(explicit string, names ...string) string {
+	return findBinaryIn(explicit, nil, names...)
+}
+
+// findBinaryIn is findBinary with extra directories searched before PATH.
+func findBinaryIn(explicit string, extra []string, names ...string) string {
 	if explicit != "" {
-		if _, err := os.Stat(explicit); err == nil {
+		if st, err := os.Stat(explicit); err == nil && !st.IsDir() {
 			return explicit
 		}
 	}
@@ -85,6 +94,7 @@ func findBinary(explicit string, names ...string) string {
 		dirs = append(dirs, d, filepath.Join(d, "bin"))
 	}
 	dirs = append(dirs, ".", "bin")
+	dirs = append(dirs, extra...)
 	for _, n := range names {
 		if runtime.GOOS == "windows" {
 			n += ".exe"

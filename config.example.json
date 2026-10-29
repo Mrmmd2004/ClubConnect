@@ -2,9 +2,12 @@
   "listen": "127.0.0.1",
   "port": 8888,
   "api_port": 8808,
-  "mode": "auto",
+  "mode": "",
   "order": ["warp", "psiphon", "tor"],
   "username": "",
   "password": "",
-  "psiphon": { "region": "" }
+  "verbose": false,
+  "warp": { "endpoints": [] },
+  "psiphon": { "region": "", "style": "auto" },
+  "tor": { "bridge": "auto" }
 }

@@ -45,15 +45,18 @@ type Manager struct {
 	up     atomic.Uint64
 	down   atomic.Uint64
 	kick   chan struct{}
+
+	failMu sync.Mutex
+	failAt map[string]time.Time
 }
 
 func NewManager(cfg *Config, backends []Backend) *Manager {
-	m := &Manager{cfg: cfg, kick: make(chan struct{}, 1)}
+	m := &Manager{cfg: cfg, kick: make(chan struct{}, 1), failAt: map[string]time.Time{}}
 	for _, b := range backends {
 		m.bs = append(m.bs, &bstate{b: b})
 	}
 	m.active.Store(-1)
-	m.mode.Store(cfg.Mode)
+	m.mode.Store("auto") // the Controller pins a single backend when a manual mode is chosen
 	return m
 }
 
@@ -139,6 +142,21 @@ func (m *Manager) note(s *bstate, err error) {
 	}
 }
 
+// logFail makes failed connections visible: the first one per backend every 20 s, or all of
+// them with verbose on. Before this the core failed silently.
+func (m *Manager) logFail(name, addr string, err error) {
+	m.failMu.Lock()
+	now := time.Now()
+	show := m.cfg.Verbose || now.Sub(m.failAt[name]) > 20*time.Second
+	if show {
+		m.failAt[name] = now
+	}
+	m.failMu.Unlock()
+	if show {
+		log.Printf("[%s] cannot reach %s: %v", name, addr, err)
+	}
+}
+
 func (m *Manager) DialTCP(ctx context.Context, addr string) (net.Conn, error) {
 	var last error = errors.New("no backend is ready yet")
 	for _, s := range m.candidates(false) {
@@ -149,6 +167,7 @@ func (m *Manager) DialTCP(ctx context.Context, addr string) (net.Conn, error) {
 		if err == nil {
 			return &countConn{c, m}, nil
 		}
+		m.logFail(s.b.Name(), addr, err)
 		last = err
 		if ctx.Err() != nil {
 			break

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"flag"
 	"fmt"
@@ -11,16 +12,27 @@ import (
 	"syscall"
 )
 
-var Version = "0.8"
+var Version = "0.9"
 
 const Name = "Club Connect"
+
+// fatal prints the problem and, when started by double-click, waits so the window stays readable.
+func fatal(err error) {
+	log.Print(err)
+	if isTerminal(os.Stdin) {
+		fmt.Print("press Enter to close... ")
+		bufio.NewReader(os.Stdin).ReadString('\n')
+	}
+	os.Exit(1)
+}
 
 func main() {
 	cfgPath := flag.String("c", "config.json", "config file (optional)")
 	dataDir := flag.String("d", "", "data directory")
 	port := flag.Int("port", 0, "proxy port (default 8888)")
-	order := flag.String("order", "", "backends in priority order, e.g. warp,psiphon,tor")
-	mode := flag.String("mode", "", "auto, warp, psiphon or tor")
+	order := flag.String("order", "", "engines used by auto mode, priority order, e.g. warp,psiphon,tor")
+	mode := flag.String("mode", "", "start this mode at once: auto, warp, psiphon, tor, warp+psiphon, warp+tor (default: start nothing, show the menu)")
+	menu := flag.Bool("menu", false, "show the menu even when -mode is given")
 	ver := flag.Bool("v", false, "print version")
 	flag.Parse()
 	if *ver {
@@ -29,11 +41,15 @@ func main() {
 	}
 	cfg, err := loadConfig(*cfgPath)
 	if err != nil {
-		log.Fatal(err)
+		fatal(err)
 	}
 	if *dataDir != "" {
 		cfg.DataDir = *dataDir
 	}
+	if err := cfg.validate(); err != nil {
+		fatal(err)
+	}
+	cfg.loadSettings() // choices made in the menu last time
 	if *port != 0 {
 		cfg.Port = *port
 	}
@@ -44,34 +60,28 @@ func main() {
 		cfg.Mode = *mode
 	}
 	if err := cfg.validate(); err != nil {
-		log.Fatal(err)
-	}
-
-	var bs []Backend
-	for _, n := range cfg.Order {
-		switch strings.TrimSpace(n) {
-		case "warp":
-			bs = append(bs, NewWarp(cfg))
-		case "psiphon":
-			bs = append(bs, NewPsiphon(cfg))
-		case "tor":
-			bs = append(bs, NewTor(cfg))
-		default:
-			log.Fatalf("unknown backend %q", n)
-		}
-	}
-	if len(bs) == 0 {
-		log.Fatal("no backends enabled")
+		fatal(err)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	log.Printf("%s v%s - proxy on %s:%d (SOCKS5 + HTTP)", Name, Version, cfg.Listen, cfg.Port)
+	ctl := NewController(ctx, cfg)
+	serveAPI(ctx, cfg, ctl)
+	log.Printf("%s v%s", Name, Version)
 
-	m := NewManager(cfg, bs)
-	go m.Run(ctx)
-	serveAPI(ctx, cfg, m)
-	if err := (&Inbound{m: m, cfg: cfg}).Serve(ctx); err != nil {
-		log.Fatal(err)
+	if cfg.Mode != "" {
+		if err := ctl.Start(cfg.Mode); err != nil {
+			fatal(err)
+		}
 	}
+	switch {
+	case isTerminal(os.Stdin) && (cfg.Mode == "" || *menu):
+		runMenu(ctx, ctl, cfg)
+	case cfg.Mode == "":
+		log.Printf("idle: nothing is running. Start a mode with  GET http://127.0.0.1:%d/start?mode=auto  or run with -mode", cfg.APIPort)
+		<-ctx.Done()
+	default:
+		<-ctx.Done()
+	}
+	ctl.Stop()
 }

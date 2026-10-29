@@ -31,6 +31,11 @@ func (in *Inbound) Serve(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	return in.serve(ctx, ln)
+}
+
+// serve accepts on an already-bound listener until ctx ends.
+func (in *Inbound) serve(ctx context.Context, ln net.Listener) error {
 	go func() { <-ctx.Done(); ln.Close() }()
 	for {
 		c, err := ln.Accept()

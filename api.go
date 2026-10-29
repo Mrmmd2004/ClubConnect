@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"io"
+	"log"
 	"net"
 	"net/http"
 	"strconv"
@@ -21,6 +23,10 @@ type backendStatus struct {
 
 type status struct {
 	Version  string          `json:"version"`
+	Running  bool            `json:"running"`
+	RunMode  string          `json:"run_mode"`
+	LastMode string          `json:"last_mode"`
+	Port     int             `json:"port"`
 	Mode     string          `json:"mode"`
 	Active   string          `json:"active"`
 	Up       uint64          `json:"bytes_up"`
@@ -45,7 +51,13 @@ func (m *Manager) Status() status {
 }
 
 // Control API for the app that embeds the core. Loopback only.
-func serveAPI(ctx context.Context, cfg *Config, m *Manager) {
+//
+//	GET /status
+//	GET /start?mode=auto|warp|psiphon|tor|warp+psiphon|warp+tor
+//	GET /stop
+//	GET /switch?backend=...   (inside the running mode)
+//	GET /test
+func serveAPI(ctx context.Context, cfg *Config, ctl *Controller) {
 	if cfg.APIPort < 0 {
 		return
 	}
@@ -59,17 +71,32 @@ func serveAPI(ctx context.Context, cfg *Config, m *Manager) {
 			h(w, r)
 		}
 	}
-	mux.HandleFunc("/status", guard(func(w http.ResponseWriter, r *http.Request) {
+	reply := func(w http.ResponseWriter) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(m.Status())
-	}))
-	mux.HandleFunc("/switch", guard(func(w http.ResponseWriter, r *http.Request) {
-		if err := m.SetMode(r.URL.Query().Get("backend")); err != nil {
+		json.NewEncoder(w).Encode(ctl.Status())
+	}
+	mux.HandleFunc("/status", guard(func(w http.ResponseWriter, r *http.Request) { reply(w) }))
+	mux.HandleFunc("/start", guard(func(w http.ResponseWriter, r *http.Request) {
+		if err := ctl.Start(r.URL.Query().Get("mode")); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(m.Status())
+		reply(w)
+	}))
+	mux.HandleFunc("/stop", guard(func(w http.ResponseWriter, r *http.Request) {
+		ctl.Stop()
+		reply(w)
+	}))
+	mux.HandleFunc("/switch", guard(func(w http.ResponseWriter, r *http.Request) {
+		if err := ctl.Switch(r.URL.Query().Get("backend")); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		reply(w)
+	}))
+	mux.HandleFunc("/test", guard(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		io.WriteString(w, ctl.Test())
 	}))
 	srv := &http.Server{
 		Addr:              net.JoinHostPort("127.0.0.1", strconv.Itoa(cfg.APIPort)),
@@ -77,5 +104,9 @@ func serveAPI(ctx context.Context, cfg *Config, m *Manager) {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	go func() { <-ctx.Done(); srv.Close() }()
-	go srv.ListenAndServe()
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && ctx.Err() == nil {
+			log.Printf("[api] cannot listen on %s: %v", srv.Addr, err)
+		}
+	}()
 }
