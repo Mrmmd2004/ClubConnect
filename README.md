@@ -26,3 +26,10 @@
 
 ## بیلد
 Actions → Build Club Connect → Run workflow (یا tag مثل `v0.8`).
+
+## پلتفرم‌ها (۹ خروجی)
+android-arm64, android-armv7a, linux-amd64, linux-arm64, windows-amd64, windows-x86, windows-arm64, macos-arm64, macos-amd64
+
+- macOS: بعد از استخراج یک‌بار `xattr -d com.apple.quarantine clubconnect psiphon-tunnel-core` بزنید
+- `tor` در linux-arm64 و windows-arm64 همراه zip نیست؛ باینری tor را خودتان کنار برنامه بگذارید
+- iOS پشتیبانی نمی‌شود (اپ‌های iOS نمی‌توانند باینری جدا اجرا کنند)
