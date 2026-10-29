@@ -6,7 +6,7 @@ on:
     tags: ["v*"]
 
 env:
-  VERSION: "0.8"
+  VERSION: "0.9"
 
 jobs:
   build:
@@ -48,7 +48,9 @@ jobs:
           mkdir -p pkg
           go build -trimpath -ldflags "-s -w -X main.Version=$VERSION" -o pkg/clubconnect$EXT .
 
-      - name: Build Psiphon tunnel-core (official client)
+      - name: Build Psiphon tunnel-core (the fork Aether uses)
+        # The fork adds the FRONTED-MEEK-CDN-* protocols. A stock tunnel-core rejects a config
+        # that names them and exits at once, which showed up as "[psiphon] process exited" forever.
         continue-on-error: true
         env:
           CGO_ENABLED: "0"
@@ -58,8 +60,9 @@ jobs:
           GOFLAGS: -mod=vendor
         run: |
           EXT=""; [ "$GOOS" = "windows" ] && EXT=".exe"
-          git clone --depth 1 https://github.com/Psiphon-Labs/psiphon-tunnel-core.git /tmp/psiphon
+          git -c core.longpaths=true clone --quiet --depth 50 --branch shirokhorshid https://github.com/CluvexStudio/psiphon-tunnel-core.git /tmp/psiphon
           cd /tmp/psiphon
+          git checkout --quiet 83aa73b9b982e7421e00117f5b0c5aceb5dda452 2>/dev/null || echo "pinned commit is gone, using the branch head"
           go build -trimpath -ldflags "-s -w" -o "$GITHUB_WORKSPACE/pkg/psiphon-tunnel-core$EXT" ./ConsoleClient
 
       - name: Build Tor pluggable transports (lyrebird, snowflake)
@@ -85,11 +88,16 @@ jobs:
           cp "$(command -v tor)" pkg/tor
 
       - name: Add tor (Tor Project expert bundle, other platforms)
-        # Set a repository variable TOR_EXPERT_VERSION (for example 14.5.8) to enable.
-        if: matrix.name != 'linux-amd64' && matrix.tor_bundle != '' && vars.TOR_EXPERT_VERSION != ''
+        # Uses the newest Tor Browser version unless a repository variable TOR_EXPERT_VERSION
+        # (for example 14.5.8) pins one.
+        if: matrix.name != 'linux-amd64' && matrix.tor_bundle != ''
         continue-on-error: true
         run: |
           V="${{ vars.TOR_EXPERT_VERSION }}"
+          if [ -z "$V" ]; then
+            V=$(curl -fsSL https://aus1.torproject.org/torbrowser/update_3/release/downloads.json | python3 -c 'import sys,json; print(json.load(sys.stdin)["version"])')
+          fi
+          echo "tor expert bundle version: $V"
           curl -fsSL -o /tmp/tor.tgz "https://archive.torproject.org/tor-package-archive/torbrowser/$V/tor-expert-bundle-${{ matrix.tor_bundle }}-$V.tar.gz"
           mkdir -p /tmp/torb && tar -xzf /tmp/tor.tgz -C /tmp/torb
           find /tmp/torb -type f \( -name 'tor' -o -name 'tor.exe' -o -name '*.dll' \) -exec cp {} pkg/ \;
