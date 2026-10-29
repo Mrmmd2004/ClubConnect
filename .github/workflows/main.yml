@@ -18,7 +18,12 @@ jobs:
           - { name: android-arm64,  goos: linux,   goarch: arm64, goarm: "",  tor_bundle: android-aarch64 }
           - { name: android-armv7a, goos: linux,   goarch: arm,   goarm: "7", tor_bundle: android-armv7 }
           - { name: linux-amd64,    goos: linux,   goarch: amd64, goarm: "",  tor_bundle: linux-x86_64 }
+          - { name: linux-arm64,    goos: linux,   goarch: arm64, goarm: "",  tor_bundle: "" }
           - { name: windows-amd64,  goos: windows, goarch: amd64, goarm: "",  tor_bundle: windows-x86_64 }
+          - { name: windows-x86,    goos: windows, goarch: "386", goarm: "",  tor_bundle: windows-i686 }
+          - { name: windows-arm64,  goos: windows, goarch: arm64, goarm: "",  tor_bundle: "" }
+          - { name: macos-arm64,    goos: darwin,  goarch: arm64, goarm: "",  tor_bundle: macos-aarch64 }
+          - { name: macos-amd64,    goos: darwin,  goarch: amd64, goarm: "",  tor_bundle: macos-x86_64 }
     steps:
       - uses: actions/checkout@v4
 
@@ -81,7 +86,7 @@ jobs:
 
       - name: Add tor (Tor Project expert bundle, other platforms)
         # Set a repository variable TOR_EXPERT_VERSION (for example 14.5.8) to enable.
-        if: matrix.name != 'linux-amd64' && vars.TOR_EXPERT_VERSION != ''
+        if: matrix.name != 'linux-amd64' && matrix.tor_bundle != '' && vars.TOR_EXPERT_VERSION != ''
         continue-on-error: true
         run: |
           V="${{ vars.TOR_EXPERT_VERSION }}"
