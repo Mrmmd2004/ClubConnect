@@ -1,0 +1,118 @@
+name: Build Club Connect
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+env:
+  VERSION: "0.8"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: android-arm64,  goos: linux,   goarch: arm64, goarm: "",  tor_bundle: android-aarch64 }
+          - { name: android-armv7a, goos: linux,   goarch: arm,   goarm: "7", tor_bundle: android-armv7 }
+          - { name: linux-amd64,    goos: linux,   goarch: amd64, goarm: "",  tor_bundle: linux-x86_64 }
+          - { name: windows-amd64,  goos: windows, goarch: amd64, goarm: "",  tor_bundle: windows-x86_64 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Resolve dependencies, vet and test
+        run: |
+          go mod tidy
+          go vet ./...
+          go test -count=1 ./...
+
+      - name: Build Club Connect
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+        run: |
+          EXT=""; [ "$GOOS" = "windows" ] && EXT=".exe"
+          mkdir -p pkg
+          go build -trimpath -ldflags "-s -w -X main.Version=$VERSION" -o pkg/clubconnect$EXT .
+
+      - name: Build Psiphon tunnel-core (official client)
+        continue-on-error: true
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+          GOFLAGS: -mod=vendor
+        run: |
+          EXT=""; [ "$GOOS" = "windows" ] && EXT=".exe"
+          git clone --depth 1 https://github.com/Psiphon-Labs/psiphon-tunnel-core.git /tmp/psiphon
+          cd /tmp/psiphon
+          go build -trimpath -ldflags "-s -w" -o "$GITHUB_WORKSPACE/pkg/psiphon-tunnel-core$EXT" ./ConsoleClient
+
+      - name: Build Tor pluggable transports (lyrebird, snowflake)
+        continue-on-error: true
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+        run: |
+          EXT=""; [ "$GOOS" = "windows" ] && EXT=".exe"
+          P=https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports
+          git clone --depth 1 $P/lyrebird.git /tmp/lyrebird
+          (cd /tmp/lyrebird && go build -trimpath -ldflags "-s -w" -o "$GITHUB_WORKSPACE/pkg/lyrebird$EXT" ./cmd/lyrebird)
+          git clone --depth 1 $P/snowflake.git /tmp/snowflake
+          (cd /tmp/snowflake && go build -trimpath -ldflags "-s -w" -o "$GITHUB_WORKSPACE/pkg/snowflake-client$EXT" ./client)
+
+      - name: Add tor (Linux x86_64 from apt)
+        if: matrix.name == 'linux-amd64'
+        continue-on-error: true
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq tor
+          cp "$(command -v tor)" pkg/tor
+
+      - name: Add tor (Tor Project expert bundle, other platforms)
+        # Set a repository variable TOR_EXPERT_VERSION (for example 14.5.8) to enable.
+        if: matrix.name != 'linux-amd64' && vars.TOR_EXPERT_VERSION != ''
+        continue-on-error: true
+        run: |
+          V="${{ vars.TOR_EXPERT_VERSION }}"
+          curl -fsSL -o /tmp/tor.tgz "https://archive.torproject.org/tor-package-archive/torbrowser/$V/tor-expert-bundle-${{ matrix.tor_bundle }}-$V.tar.gz"
+          mkdir -p /tmp/torb && tar -xzf /tmp/tor.tgz -C /tmp/torb
+          find /tmp/torb -type f \( -name 'tor' -o -name 'tor.exe' -o -name '*.dll' \) -exec cp {} pkg/ \;
+
+      - name: Package
+        run: |
+          cp config.example.json README.md pkg/
+          D=clubconnect-v$VERSION-${{ matrix.name }}
+          mv pkg "$D"
+          zip -qr "$D.zip" "$D"
+          ls -la "$D"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clubconnect-${{ matrix.name }}
+          path: clubconnect-v*.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: clubconnect-*
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: clubconnect-v*.zip
