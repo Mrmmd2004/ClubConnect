@@ -20,11 +20,11 @@ var allModes = []string{"auto", "warp", "psiphon", "tor", "warp+psiphon", "warp+
 
 var modeLabels = map[string]string{
 	"auto":         "Auto (best of WARP / Psiphon / Tor)",
-	"warp":         "Cloudflare WARP only",
+	"warp":         "WARP only",
 	"psiphon":      "Psiphon only",
 	"tor":          "Tor only",
-	"warp+psiphon": "Cloudflare -> Psiphon",
-	"warp+tor":     "Cloudflare -> Tor",
+	"warp+psiphon": "WARP -> Psiphon",
+	"warp+tor":     "WARP -> Tor",
 }
 
 func modeLabel(m string) string {
@@ -32,6 +32,19 @@ func modeLabel(m string) string {
 		return l
 	}
 	return m
+}
+
+// splitMode separates an optional WARP variant: "warp@masque" -> ("warp", "masque").
+func splitMode(s string) (mode, variant string) {
+	if i := strings.IndexByte(s, '@'); i >= 0 {
+		return strings.TrimSpace(s[:i]), strings.TrimSpace(s[i+1:])
+	}
+	return strings.TrimSpace(s), ""
+}
+
+// modeUsesWarp tells whether a mode has a WARP engine whose variant can be chosen.
+func modeUsesWarp(mode string) bool {
+	return mode == "auto" || mode == "warp" || mode == "warp+psiphon" || mode == "warp+tor"
 }
 
 // normMode accepts a few spellings ("Cloudflare-Tor", "cf->psiphon") and returns "" if unknown.
@@ -52,24 +65,25 @@ type Controller struct {
 	appCtx context.Context
 
 	mu     sync.Mutex
-	mgr    *Manager
-	mode   string
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	mgr     *Manager
+	mode    string
+	variant string
+	cancel  context.CancelFunc
+	wg      sync.WaitGroup
 }
 
 func NewController(ctx context.Context, cfg *Config) *Controller {
 	return &Controller{cfg: cfg, appCtx: ctx}
 }
 
-func (c *Controller) backendsFor(mode string) ([]Backend, string, error) {
+func (c *Controller) backendsFor(mode, variant string) ([]Backend, string, error) {
 	switch mode {
 	case "auto":
 		var bs []Backend
 		for _, n := range c.cfg.Order {
 			switch strings.TrimSpace(n) {
 			case "warp":
-				bs = append(bs, NewWarp(c.cfg))
+				bs = append(bs, newWarpBackend(c.cfg, variant))
 			case "psiphon":
 				bs = append(bs, NewPsiphon(c.cfg))
 			case "tor":
@@ -83,21 +97,24 @@ func (c *Controller) backendsFor(mode string) ([]Backend, string, error) {
 		}
 		return bs, "", nil
 	case "warp":
-		return []Backend{NewWarp(c.cfg)}, "warp", nil
+		return []Backend{newWarpBackend(c.cfg, variant)}, "warp", nil
 	case "psiphon":
 		return []Backend{NewPsiphon(c.cfg)}, "psiphon", nil
 	case "tor":
 		return []Backend{NewTor(c.cfg)}, "tor", nil
 	case "warp+psiphon":
-		return []Backend{NewChainPsiphon(c.cfg)}, "warp+psiphon", nil
+		return []Backend{NewChainPsiphon(c.cfg, variant)}, "warp+psiphon", nil
 	case "warp+tor":
-		return []Backend{NewChainTor(c.cfg)}, "warp+tor", nil
+		return []Backend{NewChainTor(c.cfg, variant)}, "warp+tor", nil
 	}
 	return nil, "", fmt.Errorf("unknown mode %q", mode)
 }
 
 // preflight refuses a manual mode whose program is missing, so the failure is shown at once.
-func (c *Controller) preflight(mode string) error {
+func (c *Controller) preflight(mode, variant string) error {
+	if modeUsesWarp(mode) && variantNeedsAether(variant) && aetherBin(c.cfg) == "" {
+		return fmt.Errorf("WARP variant %q needs aether%s next to clubconnect (or set its path in Settings); choose the built-in \"wg\" or \"auto\" instead", variant, exeSuffix())
+	}
 	if (mode == "psiphon" || mode == "warp+psiphon") && psiphonBin(c.cfg) == "" {
 		return errors.New("psiphon-tunnel-core was not found next to clubconnect (or set its path in Settings)")
 	}
@@ -108,18 +125,29 @@ func (c *Controller) preflight(mode string) error {
 }
 
 // Start stops whatever runs and starts the given mode.
-func (c *Controller) Start(mode string) error {
-	mode = normMode(mode)
+// The mode may carry a WARP variant: "warp@masque", "warp+tor@gool", "auto@wg-noize".
+// Without one the variant chosen in the menu / config for that mode is used.
+func (c *Controller) Start(spec string) error {
+	raw, v := splitMode(spec)
+	mode := normMode(raw)
 	if mode == "" {
 		return fmt.Errorf("unknown mode (use one of: %s)", strings.Join(allModes, ", "))
 	}
-	if err := c.preflight(mode); err != nil {
+	variant := c.cfg.variantFor(mode)
+	if v != "" {
+		if variant = normVariant(v); variant == "" {
+			return fmt.Errorf("unknown WARP variant %q (use one of: %s)", v, strings.Join(warpVariants, ", "))
+		}
+	} else if c.cfg.ModeVariant != "" {
+		variant, c.cfg.ModeVariant = c.cfg.ModeVariant, "" // from -variant / "mode": "warp@x", first start only
+	}
+	if err := c.preflight(mode, variant); err != nil {
 		return err
 	}
 	c.Stop()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	bs, pin, err := c.backendsFor(mode)
+	bs, pin, err := c.backendsFor(mode, variant)
 	if err != nil {
 		return err
 	}
@@ -136,10 +164,14 @@ func (c *Controller) Start(mode string) error {
 	c.wg.Add(2)
 	go func() { defer c.wg.Done(); m.Run(ctx) }()
 	go func() { defer c.wg.Done(); in.serve(ctx, ln) }()
-	c.mgr, c.mode, c.cancel = m, mode, cancel
+	c.mgr, c.mode, c.variant, c.cancel = m, mode, variant, cancel
 	c.cfg.LastMode = mode
 	c.cfg.saveSettings()
-	log.Printf("[core] %s - proxy on %s:%d (SOCKS5 + HTTP)", modeLabel(mode), c.cfg.Listen, c.cfg.Port)
+	if modeUsesWarp(mode) {
+		log.Printf("[core] %s [WARP: %s] - proxy on %s:%d (SOCKS5 + HTTP)", modeLabel(mode), variantName(variant), c.cfg.Listen, c.cfg.Port)
+	} else {
+		log.Printf("[core] %s - proxy on %s:%d (SOCKS5 + HTTP)", modeLabel(mode), c.cfg.Listen, c.cfg.Port)
+	}
 	return nil
 }
 
@@ -147,7 +179,7 @@ func (c *Controller) Start(mode string) error {
 func (c *Controller) Stop() {
 	c.mu.Lock()
 	cancel := c.cancel
-	c.cancel, c.mgr, c.mode = nil, nil, ""
+	c.cancel, c.mgr, c.mode, c.variant = nil, nil, "", ""
 	c.mu.Unlock()
 	if cancel == nil {
 		return
@@ -161,6 +193,13 @@ func (c *Controller) Running() (bool, string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.mgr != nil, c.mode
+}
+
+// RunVariant is the WARP variant the running mode was started with ("" when stopped).
+func (c *Controller) RunVariant() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.variant
 }
 
 // Switch changes the active engine inside the running mode (auto mode only, in practice).
@@ -184,6 +223,7 @@ func (c *Controller) Status() status {
 	st := m.Status()
 	st.Running = true
 	st.RunMode = mode
+	st.Variant = c.RunVariant()
 	st.LastMode = c.cfg.LastMode
 	st.Port = c.cfg.Port
 	return st
@@ -211,6 +251,9 @@ func (c *Controller) Test() string {
 	}
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "mode: %s\n", modeLabel(mode))
+	if v := c.RunVariant(); modeUsesWarp(mode) && v != "" {
+		fmt.Fprintf(&sb, "WARP variant: %s\n", variantName(v))
+	}
 	t0 := time.Now()
 	resp, err := cl.Get("https://www.cloudflare.com/cdn-cgi/trace")
 	if err != nil {
@@ -228,7 +271,7 @@ func (c *Controller) Test() string {
 		}
 	}
 	for _, b := range m.Status().Backends {
-		fmt.Fprintf(&sb, "  [%s] ready=%v healthy=%v latency=%dms", b.Name, b.Ready, b.Healthy, b.LatencyMS)
+		fmt.Fprintf(&sb, "  [%s%s] ready=%v healthy=%v latency=%dms", b.Name, orDefault(" "+b.Variant, ""), b.Ready, b.Healthy, b.LatencyMS)
 		if b.Error != "" {
 			fmt.Fprintf(&sb, "  last error: %s", b.Error)
 		}

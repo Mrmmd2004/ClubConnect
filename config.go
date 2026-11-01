@@ -26,11 +26,24 @@ type Config struct {
 
 	// Not read from config.json: the mode used last time (kept in settings.json).
 	LastMode string `json:"-"`
+	// Set when "mode" was written as "warp@masque" (or by -variant): used for that start only.
+	ModeVariant string `json:"-"`
 
 	Warp struct {
-		Endpoints []string `json:"endpoints"`
-		WGConf    string   `json:"wg_conf"`
+		Endpoints      []string `json:"endpoints"`
+		WGConf         string   `json:"wg_conf"`
+		Variant        string   `json:"variant"`         // WARP mode: auto | wg | masque | masque-h2 | gool | gool-classic | mim | wg-noize
+		PsiphonVariant string   `json:"psiphon_variant"` // which WARP the WARP -> Psiphon mode uses
+		TorVariant     string   `json:"tor_variant"`     // which WARP the WARP -> Tor mode uses
+		Auto           []string `json:"auto"`            // waves for variant auto, e.g. ["wg+masque","gool"]
 	} `json:"warp"`
+	Aether struct {
+		Bin      string `json:"bin"`
+		Scan     string `json:"scan"`     // turbo | balanced | thorough | verified | ironclad
+		IP       string `json:"ip"`       // 4 | 6 | both
+		Noize    string `json:"noize"`    // "" (aether's default) | off | light | firewall | balanced | gfw | aggressive
+		Fragment bool   `json:"fragment"` // split the TLS ClientHello (helps registration behind SNI filters)
+	} `json:"aether"`
 	Psiphon struct {
 		Bin    string `json:"bin"`
 		Region string `json:"region"` // e.g. "DE"; empty = best
@@ -55,6 +68,8 @@ func defaultConfig() *Config {
 	}
 	c.Psiphon.Style = "auto"
 	c.Tor.Bridge = "auto"
+	c.Warp.Variant, c.Warp.PsiphonVariant, c.Warp.TorVariant = "auto", "auto", "auto"
+	c.Aether.Scan, c.Aether.IP, c.Aether.Fragment = "balanced", "4", true
 	return c
 }
 
@@ -98,11 +113,54 @@ func (c *Config) validate() error {
 		return fmt.Errorf("listening on %s without username/password would make an open proxy", c.Listen)
 	}
 	if c.Mode != "" {
-		m := normMode(c.Mode)
+		raw, v := splitMode(c.Mode)
+		m := normMode(raw)
 		if m == "" {
 			return fmt.Errorf("unknown mode %q (use one of: %s)", c.Mode, strings.Join(allModes, ", "))
 		}
 		c.Mode = m
+		if v != "" {
+			nv := normVariant(v)
+			if nv == "" {
+				return fmt.Errorf("unknown WARP variant %q (use one of: %s)", v, strings.Join(warpVariants, ", "))
+			}
+			c.ModeVariant = nv
+		}
+	}
+	for _, p := range []*string{&c.Warp.Variant, &c.Warp.PsiphonVariant, &c.Warp.TorVariant} {
+		if strings.TrimSpace(*p) == "" {
+			*p = "auto"
+			continue
+		}
+		nv := normVariant(*p)
+		if nv == "" {
+			return fmt.Errorf("unknown WARP variant %q (use one of: %s)", *p, strings.Join(warpVariants, ", "))
+		}
+		*p = nv
+	}
+	switch strings.ToLower(strings.TrimSpace(c.Aether.Scan)) {
+	case "":
+		c.Aether.Scan = "balanced"
+	case "turbo", "balanced", "thorough", "verified", "ironclad":
+		c.Aether.Scan = strings.ToLower(strings.TrimSpace(c.Aether.Scan))
+	default:
+		return fmt.Errorf("aether.scan must be turbo, balanced, thorough, verified or ironclad")
+	}
+	switch strings.ToLower(strings.TrimSpace(c.Aether.IP)) {
+	case "", "4", "v4", "ipv4":
+		c.Aether.IP = "4"
+	case "6", "v6", "ipv6":
+		c.Aether.IP = "6"
+	case "both", "dual":
+		c.Aether.IP = "both"
+	default:
+		return fmt.Errorf("aether.ip must be 4, 6 or both")
+	}
+	switch strings.ToLower(strings.TrimSpace(c.Aether.Noize)) {
+	case "", "off", "light", "firewall", "balanced", "gfw", "aggressive":
+		c.Aether.Noize = strings.ToLower(strings.TrimSpace(c.Aether.Noize))
+	default:
+		return fmt.Errorf("aether.noize must be off, light, firewall, balanced, gfw or aggressive")
 	}
 	switch strings.ToLower(strings.TrimSpace(c.Psiphon.Style)) {
 	case "", "auto":
@@ -145,6 +203,15 @@ type userSettings struct {
 	TorBin        string `json:"tor_bin"`
 	TorBridges    string `json:"tor_bridges_file"`
 	WarpEndpoint  string `json:"warp_endpoint"`
+
+	WarpVariant    string `json:"warp_variant"`
+	PsiphonVariant string `json:"warp_psiphon_variant"`
+	TorVariant     string `json:"warp_tor_variant"`
+	AetherBin      string `json:"aether_bin"`
+	AetherScan     string `json:"aether_scan"`
+	AetherIP       string `json:"aether_ip"`
+	AetherNoize    string `json:"aether_noize"`
+	AetherFragment string `json:"aether_fragment"` // "on" | "off" | "" (not chosen yet: keep the default)
 }
 
 func (c *Config) settingsPath() string { return filepath.Join(c.DataDir, "settings.json") }
@@ -178,6 +245,58 @@ func (c *Config) loadSettings() {
 	} else {
 		c.Warp.Endpoints = nil
 	}
+	// Files written by older versions lack these keys: an empty value keeps the default.
+	if v := normVariant(s.WarpVariant); v != "" {
+		c.Warp.Variant = v
+	}
+	if v := normVariant(s.PsiphonVariant); v != "" {
+		c.Warp.PsiphonVariant = v
+	}
+	if v := normVariant(s.TorVariant); v != "" {
+		c.Warp.TorVariant = v
+	}
+	c.Aether.Bin = s.AetherBin
+	if s.AetherScan != "" {
+		c.Aether.Scan = s.AetherScan
+	}
+	if s.AetherIP != "" {
+		c.Aether.IP = s.AetherIP
+	}
+	c.Aether.Noize = s.AetherNoize
+	switch s.AetherFragment {
+	case "on":
+		c.Aether.Fragment = true
+	case "off":
+		c.Aether.Fragment = false
+	}
+}
+
+// variantFor returns the WARP variant a mode uses (the setting made in the menu or config).
+func (c *Config) variantFor(mode string) string {
+	var v string
+	switch mode {
+	case "warp+psiphon":
+		v = c.Warp.PsiphonVariant
+	case "warp+tor":
+		v = c.Warp.TorVariant
+	default:
+		v = c.Warp.Variant
+	}
+	if v = normVariant(v); v == "" {
+		v = "auto"
+	}
+	return v
+}
+
+func (c *Config) setVariant(mode, v string) {
+	switch mode {
+	case "warp+psiphon":
+		c.Warp.PsiphonVariant = v
+	case "warp+tor":
+		c.Warp.TorVariant = v
+	default:
+		c.Warp.Variant = v
+	}
 }
 
 func (c *Config) saveSettings() {
@@ -194,6 +313,12 @@ func (c *Config) saveSettings() {
 	}
 	if len(c.Warp.Endpoints) > 0 {
 		s.WarpEndpoint = c.Warp.Endpoints[0]
+	}
+	s.WarpVariant, s.PsiphonVariant, s.TorVariant = c.Warp.Variant, c.Warp.PsiphonVariant, c.Warp.TorVariant
+	s.AetherBin, s.AetherScan, s.AetherIP, s.AetherNoize = c.Aether.Bin, c.Aether.Scan, c.Aether.IP, c.Aether.Noize
+	s.AetherFragment = "off"
+	if c.Aether.Fragment {
+		s.AetherFragment = "on"
 	}
 	b, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {

@@ -12,7 +12,7 @@ import (
 	"syscall"
 )
 
-var Version = "0.9"
+var Version = "1.0"
 
 const Name = "Club Connect"
 
@@ -31,7 +31,8 @@ func main() {
 	dataDir := flag.String("d", "", "data directory")
 	port := flag.Int("port", 0, "proxy port (default 8888)")
 	order := flag.String("order", "", "engines used by auto mode, priority order, e.g. warp,psiphon,tor")
-	mode := flag.String("mode", "", "start this mode at once: auto, warp, psiphon, tor, warp+psiphon, warp+tor (default: start nothing, show the menu)")
+	mode := flag.String("mode", "", "start this mode at once: auto, warp, psiphon, tor, warp+psiphon, warp+tor; \"warp@masque\" also picks the WARP variant (default: start nothing, show the menu)")
+	variant := flag.String("variant", "", "WARP variant for this start: auto, wg, masque, masque-h2, gool, gool-classic, mim, wg-noize")
 	menu := flag.Bool("menu", false, "show the menu even when -mode is given")
 	ver := flag.Bool("v", false, "print version")
 	flag.Parse()
@@ -61,6 +62,13 @@ func main() {
 	}
 	if err := cfg.validate(); err != nil {
 		fatal(err)
+	}
+	if *variant != "" {
+		nv := normVariant(*variant)
+		if nv == "" {
+			fatal(fmt.Errorf("unknown WARP variant %q (use one of: %s)", *variant, strings.Join(warpVariants, ", ")))
+		}
+		cfg.ModeVariant = nv
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

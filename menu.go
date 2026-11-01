@@ -40,26 +40,66 @@ func printMenu(ctl *Controller, cfg *Config) {
 	fmt.Println()
 	fmt.Printf("================ %s v%s ================\n", Name, Version)
 	if running {
-		fmt.Printf(" Status : RUNNING - %s\n          proxy %s:%d (SOCKS5 + HTTP)\n", modeLabel(mode), cfg.Listen, cfg.Port)
+		if modeUsesWarp(mode) {
+			fmt.Printf(" Status : RUNNING - %s  [WARP: %s]\n          proxy %s:%d (SOCKS5 + HTTP)\n", modeLabel(mode), variantName(ctl.RunVariant()), cfg.Listen, cfg.Port)
+		} else {
+			fmt.Printf(" Status : RUNNING - %s\n          proxy %s:%d (SOCKS5 + HTTP)\n", modeLabel(mode), cfg.Listen, cfg.Port)
+		}
 	} else {
 		fmt.Println(" Status : STOPPED - nothing runs until you pick a mode")
 	}
-	fmt.Printf(" Engines: warp built-in | psiphon %s | tor %s\n", okMissing(psiphonBin(cfg)), okMissing(torBin(cfg)))
+	fmt.Printf(" Engines: warp built-in | aether %s | psiphon %s | tor %s\n", okMissing(aetherBin(cfg)), okMissing(psiphonBin(cfg)), okMissing(torBin(cfg)))
 	fmt.Println()
-	fmt.Println("  1) Auto                  best of WARP / Psiphon / Tor, switches by itself")
-	fmt.Println("  2) WARP only             Cloudflare WARP")
+	fmt.Printf("  1) Auto                  best of WARP / Psiphon / Tor, switches by itself  [WARP: %s]\n", variantName(cfg.variantFor("auto")))
+	fmt.Printf("  2) WARP only                                                                [WARP: %s]\n", variantName(cfg.variantFor("warp")))
 	fmt.Println("  3) Psiphon only")
 	fmt.Println("  4) Tor only")
-	fmt.Println("  5) Cloudflare -> Psiphon Psiphon connects through WARP")
-	fmt.Println("  6) Cloudflare -> Tor     Tor connects through WARP")
+	fmt.Printf("  5) WARP -> Psiphon       Psiphon connects through WARP                      [WARP: %s]\n", variantName(cfg.variantFor("warp+psiphon")))
+	fmt.Printf("  6) WARP -> Tor           Tor connects through WARP                          [WARP: %s]\n", variantName(cfg.variantFor("warp+tor")))
 	fmt.Println("  7) Test connection       real request through the proxy + exit IP")
 	fmt.Println("  8) Status")
 	fmt.Println("  9) Settings")
 	fmt.Println("  S) Stop (keep this window)")
 	fmt.Println("  0) Stop and exit")
+	fmt.Println("  (modes 1, 2, 5, 6 ask which WARP variant to use; Enter keeps the one shown)")
 	if !running && cfg.LastMode != "" {
 		fmt.Printf("  Enter) start the last mode: %s\n", modeLabel(cfg.LastMode))
 	}
+}
+
+// chooseVariant lists the WARP variants for a mode; Enter keeps the current one.
+func chooseVariant(cfg *Config, mode string, ask func(string) (string, bool)) {
+	cur := cfg.variantFor(mode)
+	fmt.Println()
+	fmt.Printf("  WARP variant for \"%s\"   (Enter = keep: %s)\n", modeLabel(mode), variantName(cur))
+	for i, v := range warpVariants {
+		note := ""
+		if !variantAvailable(cfg, v) {
+			note = "   <- needs aether next to clubconnect"
+		}
+		mark := " "
+		if v == cur {
+			mark = "*"
+		}
+		fmt.Printf("   %s%d) %s%s\n", mark, i+1, variantLabels[v], note)
+	}
+	in, ok := ask("  variant> ")
+	if !ok || in == "" {
+		return
+	}
+	n, err := strconv.Atoi(in)
+	var v string
+	if err == nil && n >= 1 && n <= len(warpVariants) {
+		v = warpVariants[n-1]
+	} else {
+		v = normVariant(in)
+	}
+	if v == "" {
+		fmt.Println("  not a valid choice, keeping", variantName(cur))
+		return
+	}
+	cfg.setVariant(mode, v)
+	cfg.saveSettings()
 }
 
 func runMenu(ctx context.Context, ctl *Controller, cfg *Config) {
@@ -104,6 +144,9 @@ func runMenu(ctx context.Context, ctl *Controller, cfg *Config) {
 				begin(cfg.LastMode)
 			}
 		case "1", "2", "3", "4", "5", "6":
+			if m := modes[choice]; modeUsesWarp(m) {
+				chooseVariant(cfg, m, ask)
+			}
 			begin(modes[choice])
 		case "7":
 			fmt.Println("  testing (up to 25 s)...")
@@ -115,8 +158,11 @@ func runMenu(ctx context.Context, ctl *Controller, cfg *Config) {
 				break
 			}
 			fmt.Printf("  mode %s, active engine: %s, up %d B, down %d B\n", modeLabel(st.RunMode), orDefault(st.Active, "(none yet)"), st.Up, st.Down)
+			if modeUsesWarp(st.RunMode) {
+				fmt.Printf("  WARP variant: %s\n", variantName(st.Variant))
+			}
 			for _, b := range st.Backends {
-				fmt.Printf("  [%s] ready=%v healthy=%v latency=%dms %s\n", b.Name, b.Ready, b.Healthy, b.LatencyMS, b.Error)
+				fmt.Printf("  [%s%s] ready=%v healthy=%v latency=%dms %s\n", b.Name, orDefault(" "+b.Variant, ""), b.Ready, b.Healthy, b.LatencyMS, b.Error)
 			}
 		case "9":
 			settingsMenu(ctl, cfg, ask)
@@ -150,6 +196,11 @@ func settingsMenu(ctl *Controller, cfg *Config, ask func(string) (string, bool))
 		fmt.Printf("  8) WARP endpoint          [%s]   ip:port (empty = automatic)\n", orDefault(ep, "automatic"))
 		fmt.Println("  9) WARP: forget this device and register a new free one")
 		fmt.Printf("  A) Verbose log            [%s]   shows every failed connection\n", onOff(cfg.Verbose))
+		fmt.Printf("  B) Aether program path    [%s]\n", orDefault(cfg.Aether.Bin, "auto-detect: "+okMissing(aetherBin(cfg))))
+		fmt.Printf("  C) Aether scan mode       [%s]   turbo | balanced | thorough | verified | ironclad\n", cfg.Aether.Scan)
+		fmt.Printf("  D) Aether IP version      [%s]   4 | 6 | both\n", cfg.Aether.IP)
+		fmt.Printf("  E) Aether noize           [%s]   handshake disguise: off | light | firewall | balanced | gfw | aggressive\n", orDefault(cfg.Aether.Noize, "aether default"))
+		fmt.Printf("  F) Aether TLS fragment    [%s]   splits the TLS hello; helps registration behind SNI filters\n", onOff(cfg.Aether.Fragment))
 		fmt.Println("  0) Back")
 		c, ok := ask("settings> ")
 		if !ok {
@@ -214,6 +265,39 @@ func settingsMenu(ctl *Controller, cfg *Config, ask func(string) (string, bool))
 			changed = true
 		case "a":
 			cfg.Verbose, changed = !cfg.Verbose, true
+		case "b":
+			v, _ := ask("  full path of aether / aether.exe (empty = auto): ")
+			cfg.Aether.Bin, changed = strings.Trim(v, "\""), true
+		case "c":
+			v, _ := ask("  turbo | balanced | thorough | verified | ironclad: ")
+			v = strings.ToLower(v)
+			switch v {
+			case "turbo", "balanced", "thorough", "verified", "ironclad":
+				cfg.Aether.Scan, changed = v, true
+			default:
+				fmt.Println("  not valid")
+				continue
+			}
+		case "d":
+			v, _ := ask("  4 | 6 | both: ")
+			v = strings.ToLower(v)
+			if v != "4" && v != "6" && v != "both" {
+				fmt.Println("  not valid")
+				continue
+			}
+			cfg.Aether.IP, changed = v, true
+		case "e":
+			v, _ := ask("  off | light | firewall | balanced | gfw | aggressive (empty = aether default): ")
+			v = strings.ToLower(v)
+			switch v {
+			case "", "off", "light", "firewall", "balanced", "gfw", "aggressive":
+				cfg.Aether.Noize, changed = v, true
+			default:
+				fmt.Println("  not valid")
+				continue
+			}
+		case "f":
+			cfg.Aether.Fragment, changed = !cfg.Aether.Fragment, true
 		case "0", "":
 			if changed {
 				cfg.saveSettings()

@@ -7,7 +7,14 @@
   "username": "",
   "password": "",
   "verbose": false,
-  "warp": { "endpoints": [] },
+  "warp": {
+    "endpoints": [],
+    "variant": "auto",
+    "psiphon_variant": "auto",
+    "tor_variant": "auto",
+    "auto": ["wg+masque", "masque-h2+gool", "wg-noize+mim", "gool-classic"]
+  },
+  "aether": { "bin": "", "scan": "balanced", "ip": "4", "noize": "", "fragment": true },
   "psiphon": { "region": "", "style": "auto" },
   "tor": { "bridge": "auto" }
 }

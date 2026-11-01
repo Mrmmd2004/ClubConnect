@@ -14,13 +14,13 @@ import (
 	"time"
 )
 
-// Chain is "Cloudflare -> Psiphon" / "Cloudflare -> Tor": the in-process WARP tunnel is exposed
+// Chain is "WARP -> Psiphon" / "WARP -> Tor": the in-process WARP tunnel is exposed
 // to the second engine as a private SOCKS5 port (the gate), and that engine is told to use it
 // as its upstream proxy. Everything the engine sends - its handshake with Psiphon servers or
 // Tor relays, and so your traffic inside - therefore leaves through Cloudflare first.
 type Chain struct {
 	name  string
-	w     *Warp
+	w     Backend // any WARP variant (built-in WireGuard, aether-based, or auto)
 	inner Backend
 	setUp func(hostport string)
 
@@ -29,19 +29,20 @@ type Chain struct {
 	startErr atomic.Value // string
 }
 
-func NewChainPsiphon(cfg *Config) *Chain {
+func NewChainPsiphon(cfg *Config, variant string) *Chain {
 	p := NewPsiphon(cfg)
-	return &Chain{name: "warp+psiphon", w: NewWarp(cfg), inner: p,
+	return &Chain{name: "warp+psiphon", w: newWarpBackend(cfg, variant), inner: p,
 		setUp: func(hp string) { p.Upstream = "socks5://" + hp }}
 }
 
-func NewChainTor(cfg *Config) *Chain {
+func NewChainTor(cfg *Config, variant string) *Chain {
 	t := NewTor(cfg)
-	return &Chain{name: "warp+tor", w: NewWarp(cfg), inner: t,
+	return &Chain{name: "warp+tor", w: newWarpBackend(cfg, variant), inner: t,
 		setUp: func(hp string) { t.Upstream = hp }}
 }
 
 func (c *Chain) Name() string      { return c.name }
+func (c *Chain) Variant() string   { return variantOf(c.w) }
 func (c *Chain) SupportsUDP() bool { return false }
 func (c *Chain) Ready() bool       { return c.inner.Ready() }
 
@@ -53,7 +54,7 @@ func (c *Chain) LastError() string {
 		if e := c.w.LastError(); e != "" {
 			return "warp: " + e
 		}
-		return "waiting for Cloudflare WARP"
+		return "waiting for WARP (" + orDefault(variantOf(c.w), "starting") + ")"
 	}
 	return c.inner.LastError()
 }
@@ -92,7 +93,7 @@ func (c *Chain) Start(ctx context.Context) error {
 			case <-t.C:
 			}
 		}
-		log.Printf("[chain] Cloudflare WARP is up, starting %s through it", c.inner.Name())
+		log.Printf("[chain] WARP is up (%s), starting %s through it", orDefault(variantOf(c.w), "?"), c.inner.Name())
 		if err := c.inner.Start(cctx); err != nil {
 			log.Printf("[%s] %v", c.inner.Name(), err)
 			c.startErr.Store(err.Error())
@@ -115,7 +116,7 @@ func (c *Chain) Stop() {
 
 // ---------- the gate: a minimal SOCKS5 (CONNECT only, no auth) onto the WARP tunnel ----------
 
-func serveGate(ctx context.Context, ln net.Listener, w *Warp) {
+func serveGate(ctx context.Context, ln net.Listener, w Backend) {
 	go func() { <-ctx.Done(); ln.Close() }()
 	for {
 		c, err := ln.Accept()
@@ -130,7 +131,7 @@ func serveGate(ctx context.Context, ln net.Listener, w *Warp) {
 	}
 }
 
-func gateConn(ctx context.Context, c net.Conn, w *Warp) {
+func gateConn(ctx context.Context, c net.Conn, w Backend) {
 	defer c.Close()
 	br := bufio.NewReader(c)
 	c.SetReadDeadline(time.Now().Add(20 * time.Second))

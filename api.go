@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -18,6 +19,7 @@ type backendStatus struct {
 	Healthy   bool   `json:"healthy"`
 	LatencyMS int64  `json:"latency_ms"`
 	UDP       bool   `json:"udp"`
+	Variant   string `json:"variant,omitempty"` // which WARP route this engine uses
 	Error     string `json:"error,omitempty"`
 }
 
@@ -25,6 +27,7 @@ type status struct {
 	Version  string          `json:"version"`
 	Running  bool            `json:"running"`
 	RunMode  string          `json:"run_mode"`
+	Variant  string          `json:"variant"` // WARP variant the running mode was started with
 	LastMode string          `json:"last_mode"`
 	Port     int             `json:"port"`
 	Mode     string          `json:"mode"`
@@ -44,7 +47,7 @@ func (m *Manager) Status() status {
 		h, l := s.snapshot()
 		st.Backends = append(st.Backends, backendStatus{
 			Name: s.b.Name(), Ready: s.b.Ready(), Healthy: h,
-			LatencyMS: l.Milliseconds(), UDP: s.b.SupportsUDP(), Error: s.b.LastError(),
+			LatencyMS: l.Milliseconds(), UDP: s.b.SupportsUDP(), Variant: variantOf(s.b), Error: s.b.LastError(),
 		})
 	}
 	return st
@@ -53,7 +56,8 @@ func (m *Manager) Status() status {
 // Control API for the app that embeds the core. Loopback only.
 //
 //	GET /status
-//	GET /start?mode=auto|warp|psiphon|tor|warp+psiphon|warp+tor
+//	GET /start?mode=auto|warp|psiphon|tor|warp+psiphon|warp+tor[&variant=auto|wg|masque|masque-h2|gool|gool-classic|mim|wg-noize]
+//	GET /variants                  (the WARP variants and whether each can run here)
 //	GET /stop
 //	GET /switch?backend=...   (inside the running mode)
 //	GET /test
@@ -76,8 +80,25 @@ func serveAPI(ctx context.Context, cfg *Config, ctl *Controller) {
 		json.NewEncoder(w).Encode(ctl.Status())
 	}
 	mux.HandleFunc("/status", guard(func(w http.ResponseWriter, r *http.Request) { reply(w) }))
+	mux.HandleFunc("/variants", guard(func(w http.ResponseWriter, r *http.Request) {
+		type item struct {
+			Name      string `json:"name"`
+			Label     string `json:"label"`
+			Available bool   `json:"available"`
+		}
+		var out []item
+		for _, v := range warpVariants {
+			out = append(out, item{Name: v, Label: variantLabels[v], Available: variantAvailable(cfg, v)})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(out)
+	}))
 	mux.HandleFunc("/start", guard(func(w http.ResponseWriter, r *http.Request) {
-		if err := ctl.Start(r.URL.Query().Get("mode")); err != nil {
+		spec := r.URL.Query().Get("mode")
+		if v := r.URL.Query().Get("variant"); v != "" && !strings.Contains(spec, "@") {
+			spec += "@" + v
+		}
+		if err := ctl.Start(spec); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}

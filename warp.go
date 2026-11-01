@@ -62,6 +62,7 @@ type Warp struct {
 func NewWarp(cfg *Config) *Warp { return &Warp{cfg: cfg, dir: cfg.DataDir} }
 
 func (w *Warp) Name() string      { return "warp" }
+func (w *Warp) Variant() string   { return "wg" }
 func (w *Warp) SupportsUDP() bool { return true }
 func (w *Warp) Ready() bool       { return w.sess.Load() != nil }
 func (w *Warp) LastError() string { s, _ := w.err.Load().(string); return s }
@@ -283,16 +284,24 @@ func (w *Warp) identity(ctx context.Context) (*warpIdentity, error) {
 		}
 	}
 	log.Printf("[warp] registering a free device (saved to %s)", path)
-	id, err := warpRegister(ctx)
+	id, err := warpRegister(ctx, false)
+	if err != nil && ctx.Err() == nil && !strings.Contains(err.Error(), "rate limited") {
+		log.Printf("[warp] direct registration failed (%v); retrying with a fragmented TLS hello", err)
+		id, err = warpRegister(ctx, true)
+	}
+	if err != nil && ctx.Err() == nil && !strings.Contains(err.Error(), "rate limited") && aetherBin(w.cfg) != "" {
+		log.Printf("[warp] fragmented registration failed (%v); asking aether to register", err)
+		id, err = importAetherIdentity(ctx, w.cfg)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("registration failed (set warp.wg_conf to a wgcf profile if blocked): %w", err)
+		return nil, fmt.Errorf("registration failed (put aether next to clubconnect, or set warp.wg_conf to a wgcf profile): %w", err)
 	}
 	b, _ := json.MarshalIndent(id, "", "  ")
 	os.WriteFile(path, b, 0o600)
 	return id, nil
 }
 
-func warpRegister(ctx context.Context) (*warpIdentity, error) {
+func warpRegister(ctx context.Context, fragment bool) (*warpIdentity, error) {
 	priv := make([]byte, 32)
 	if _, err := rand.Read(priv); err != nil {
 		return nil, err
@@ -316,7 +325,11 @@ func warpRegister(ctx context.Context) (*warpIdentity, error) {
 	req.Header.Set("User-Agent", "okhttp/3.12.1")
 	req.Header.Set("CF-Client-Version", "a-6.3-2158")
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := (&http.Client{Timeout: 25 * time.Second}).Do(req)
+	cl := &http.Client{Timeout: 25 * time.Second}
+	if fragment {
+		cl.Transport = &http.Transport{DialTLSContext: fragDialTLS, DisableKeepAlives: true}
+	}
+	resp, err := cl.Do(req)
 	if err != nil {
 		return nil, err
 	}
