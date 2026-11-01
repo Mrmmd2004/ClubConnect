@@ -6,7 +6,7 @@ on:
     tags: ["v*"]
 
 env:
-  VERSION: "0.9"
+  VERSION: "1.0"
 
 jobs:
   build:
@@ -15,15 +15,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: android-arm64,  goos: linux,   goarch: arm64, goarm: "",  tor_bundle: android-aarch64 }
-          - { name: android-armv7a, goos: linux,   goarch: arm,   goarm: "7", tor_bundle: android-armv7 }
-          - { name: linux-amd64,    goos: linux,   goarch: amd64, goarm: "",  tor_bundle: linux-x86_64 }
-          - { name: linux-arm64,    goos: linux,   goarch: arm64, goarm: "",  tor_bundle: "" }
-          - { name: windows-amd64,  goos: windows, goarch: amd64, goarm: "",  tor_bundle: windows-x86_64 }
-          - { name: windows-x86,    goos: windows, goarch: "386", goarm: "",  tor_bundle: windows-i686 }
-          - { name: windows-arm64,  goos: windows, goarch: arm64, goarm: "",  tor_bundle: "" }
-          - { name: macos-arm64,    goos: darwin,  goarch: arm64, goarm: "",  tor_bundle: macos-aarch64 }
-          - { name: macos-amd64,    goos: darwin,  goarch: amd64, goarm: "",  tor_bundle: macos-x86_64 }
+          - { name: android-arm64,  goos: linux,   goarch: arm64, goarm: "",  tor_bundle: android-aarch64, aether: aether-android-arm64.tar.gz }
+          - { name: android-armv7a, goos: linux,   goarch: arm,   goarm: "7", tor_bundle: android-armv7, aether: aether-android-armv7.tar.gz }
+          - { name: linux-amd64,    goos: linux,   goarch: amd64, goarm: "",  tor_bundle: linux-x86_64, aether: aether-linux-x86_64.tar.gz }
+          - { name: linux-arm64,    goos: linux,   goarch: arm64, goarm: "",  tor_bundle: "", aether: aether-linux-arm64.tar.gz }
+          - { name: windows-amd64,  goos: windows, goarch: amd64, goarm: "",  tor_bundle: windows-x86_64, aether: aether-windows-x86_64.zip }
+          - { name: windows-x86,    goos: windows, goarch: "386", goarm: "",  tor_bundle: windows-i686, aether: "" }
+          - { name: windows-arm64,  goos: windows, goarch: arm64, goarm: "",  tor_bundle: "", aether: "" }
+          - { name: macos-arm64,    goos: darwin,  goarch: arm64, goarm: "",  tor_bundle: macos-aarch64, aether: aether-macos-arm64.tar.gz }
+          - { name: macos-amd64,    goos: darwin,  goarch: amd64, goarm: "",  tor_bundle: macos-x86_64, aether: aether-macos-x86_64.tar.gz }
     steps:
       - uses: actions/checkout@v4
 
@@ -101,6 +101,27 @@ jobs:
           curl -fsSL -o /tmp/tor.tgz "https://archive.torproject.org/tor-package-archive/torbrowser/$V/tor-expert-bundle-${{ matrix.tor_bundle }}-$V.tar.gz"
           mkdir -p /tmp/torb && tar -xzf /tmp/tor.tgz -C /tmp/torb
           find /tmp/torb -type f \( -name 'tor' -o -name 'tor.exe' -o -name '*.dll' \) -exec cp {} pkg/ \;
+
+      - name: Add Aether (MASQUE, gool, mim, noize - the extra WARP variants)
+        # Downloads the published Aether release for this platform and puts the binary next to
+        # clubconnect. Set a repository variable AETHER_VERSION (for example v2.4.0) to pin one;
+        # otherwise the latest release is used. Without it clubconnect still works: only the
+        # built-in WireGuard variant is available.
+        if: matrix.aether != ''
+        continue-on-error: true
+        run: |
+          V="${{ vars.AETHER_VERSION }}"
+          if [ -n "$V" ]; then URL="https://github.com/CluvexStudio/Aether/releases/download/$V/${{ matrix.aether }}"; else URL="https://github.com/CluvexStudio/Aether/releases/latest/download/${{ matrix.aether }}"; fi
+          curl -fsSL -o /tmp/aether.pkg "$URL"
+          mkdir -p /tmp/aether-x
+          case "${{ matrix.aether }}" in
+            *.zip) unzip -q -o /tmp/aether.pkg -d /tmp/aether-x ;;
+            *) tar -xzf /tmp/aether.pkg -C /tmp/aether-x ;;
+          esac
+          F=$(find /tmp/aether-x -type f \( -name aether -o -name aether.exe \) | head -n1)
+          test -n "$F"
+          cp "$F" pkg/
+          chmod +x pkg/aether* || true
 
       - name: Package
         run: |
