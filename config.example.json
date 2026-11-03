@@ -1,6 +1,6 @@
 {
   "listen": "127.0.0.1",
-  "port": 8888,
+  "port": 1819,
   "api_port": 8808,
   "mode": "",
   "order": ["warp", "psiphon", "tor"],
@@ -12,7 +12,7 @@
     "variant": "auto",
     "psiphon_variant": "auto",
     "tor_variant": "auto",
-    "auto": ["wg+masque", "masque-h2+gool", "wg-noize+mim", "gool-classic"]
+    "auto": ["masque-h2", "wg+masque", "gool+wg-noize", "mim", "gool-classic"]
   },
   "aether": { "bin": "", "scan": "balanced", "ip": "4", "noize": "", "fragment": true },
   "psiphon": { "region": "", "style": "auto" },
