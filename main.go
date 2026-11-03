@@ -18,7 +18,7 @@ import (
 	"clubconnect/internal/logx"
 )
 
-var Version = "0.8"
+var Version = "0.8.1"
 
 const Name = "Club Connect"
 

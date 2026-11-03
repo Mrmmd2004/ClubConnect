@@ -102,7 +102,7 @@ func Preflight(cfg *config.Config, mode, variant string) error {
 		return core.Wrap(ErrMissingProgram, "psiphon-tunnel-core was not found (release builds carry it inside clubconnect; otherwise put it next to clubconnect or set its path in Settings)")
 	}
 	if (mode == "tor" || mode == "warp+tor") && backends.TorBin(cfg) == "" {
-		return core.Wrap(ErrMissingProgram, "tor was not found: put tor.exe next to clubconnect, install Tor Browser, or set its path in Settings")
+		return core.Wrap(ErrMissingProgram, "tor was not found (release builds embed it inside clubconnect; otherwise put tor next to clubconnect, install Tor Browser, or set its path in Settings)")
 	}
 	return nil
 }

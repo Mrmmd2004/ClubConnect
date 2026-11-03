@@ -285,11 +285,15 @@ func (w *Warp) identity(ctx context.Context) (*warpIdentity, error) {
 		id, err = warpRegister(ctx, true)
 	}
 	if err != nil && ctx.Err() == nil && !strings.Contains(err.Error(), "rate limited") && AetherBin(w.cfg) != "" {
-		wlog.Infof("fragmented registration failed (%v); asking aether to register", err)
-		id, err = importAetherIdentity(ctx, w.cfg)
+		if AetherBin(w.cfg) != "" {
+			wlog.Infof("fragmented registration failed (%v); asking aether to register", err)
+			id, err = importAetherIdentity(ctx, w.cfg)
+		} else {
+			wlog.Infof("fragmented registration failed (%v); aether not available for fallback", err)
+		}
 	}
 	if err != nil {
-		return nil, fmt.Errorf("registration failed (put aether next to clubconnect, or set warp.wg_conf to a wgcf profile): %w", err)
+		return nil, fmt.Errorf("WARP registration failed (network may block cloudflareclient.com; try again later or set an identity manually): %w", err)
 	}
 	b, _ := json.MarshalIndent(id, "", "  ")
 	config.WriteFileAtomic(path, b, 0o600)

@@ -89,10 +89,12 @@ func torBrowserDirs() []string {
 	return out
 }
 
-// TorBin finds the tor program ("" when there is none): the path from Settings, next to
-// clubconnect, an installed Tor Browser, the unpacked copy, then PATH.
+// TorBin finds the tor program ("" when there is none): the path from Settings, the copy
+// unpacked from the executable (release builds embed tor), next to clubconnect, an installed
+// Tor Browser, then PATH.
 func TorBin(cfg *config.Config) string {
-	return proc.FindBinaryIn(cfg.Tor.Bin, append(torBrowserDirs(), unpackedDir(cfg)...), "tor")
+	extra := append(unpackedDir(cfg), torBrowserDirs()...)
+	return proc.FindBinaryIn(cfg.Tor.Bin, extra, "tor")
 }
 
 // ptDirs: where the transports (lyrebird, snowflake-client) may live next to a given tor.
