@@ -6,7 +6,7 @@ on:
     tags: ["v*"]
 
 env:
-  VERSION: "1.0"
+  VERSION: "0.8"
 
 jobs:
   build:
@@ -37,16 +37,8 @@ jobs:
           go vet ./...
           go test -count=1 ./...
 
-      - name: Build Club Connect
-        env:
-          CGO_ENABLED: "0"
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          GOARM: ${{ matrix.goarm }}
-        run: |
-          EXT=""; [ "$GOOS" = "windows" ] && EXT=".exe"
-          mkdir -p pkg
-          go build -trimpath -ldflags "-s -w -X main.Version=$VERSION" -o pkg/clubconnect$EXT .
+      - name: Prepare folders
+        run: mkdir -p pkg internal/bundle/bin
 
       - name: Build Psiphon tunnel-core (the fork Aether uses)
         # The fork adds the FRONTED-MEEK-CDN-* protocols. A stock tunnel-core rejects a config
@@ -63,7 +55,7 @@ jobs:
           git -c core.longpaths=true clone --quiet --depth 50 --branch shirokhorshid https://github.com/CluvexStudio/psiphon-tunnel-core.git /tmp/psiphon
           cd /tmp/psiphon
           git checkout --quiet 83aa73b9b982e7421e00117f5b0c5aceb5dda452 2>/dev/null || echo "pinned commit is gone, using the branch head"
-          go build -trimpath -ldflags "-s -w" -o "$GITHUB_WORKSPACE/pkg/psiphon-tunnel-core$EXT" ./ConsoleClient
+          go build -trimpath -ldflags "-s -w" -o "$GITHUB_WORKSPACE/internal/bundle/bin/psiphon-tunnel-core$EXT" ./ConsoleClient
 
       - name: Build Tor pluggable transports (lyrebird, snowflake)
         continue-on-error: true
@@ -76,9 +68,43 @@ jobs:
           EXT=""; [ "$GOOS" = "windows" ] && EXT=".exe"
           P=https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports
           git clone --depth 1 $P/lyrebird.git /tmp/lyrebird
-          (cd /tmp/lyrebird && go build -trimpath -ldflags "-s -w" -o "$GITHUB_WORKSPACE/pkg/lyrebird$EXT" ./cmd/lyrebird)
+          (cd /tmp/lyrebird && go build -trimpath -ldflags "-s -w" -o "$GITHUB_WORKSPACE/internal/bundle/bin/lyrebird$EXT" ./cmd/lyrebird)
           git clone --depth 1 $P/snowflake.git /tmp/snowflake
-          (cd /tmp/snowflake && go build -trimpath -ldflags "-s -w" -o "$GITHUB_WORKSPACE/pkg/snowflake-client$EXT" ./client)
+          (cd /tmp/snowflake && go build -trimpath -ldflags "-s -w" -o "$GITHUB_WORKSPACE/internal/bundle/bin/snowflake-client$EXT" ./client)
+
+      - name: Add Aether (MASQUE, gool, mim, noize - the extra WARP variants)
+        # Downloads the published Aether release for this platform and puts the binary into
+        # internal/bundle/bin, so the next step compiles it INTO clubconnect: one file to ship.
+        # Set a repository variable AETHER_VERSION (for example v2.4.0) to pin one; otherwise the
+        # latest release is used. Without it clubconnect still works: only the built-in WireGuard
+        # variant is available.
+        if: matrix.aether != ''
+        continue-on-error: true
+        run: |
+          V="${{ vars.AETHER_VERSION }}"
+          if [ -n "$V" ]; then URL="https://github.com/CluvexStudio/Aether/releases/download/$V/${{ matrix.aether }}"; else URL="https://github.com/CluvexStudio/Aether/releases/latest/download/${{ matrix.aether }}"; fi
+          curl -fsSL -o /tmp/aether.pkg "$URL"
+          mkdir -p /tmp/aether-x
+          case "${{ matrix.aether }}" in
+            *.zip) unzip -q -o /tmp/aether.pkg -d /tmp/aether-x ;;
+            *) tar -xzf /tmp/aether.pkg -C /tmp/aether-x ;;
+          esac
+          F=$(find /tmp/aether-x -type f \( -name aether -o -name aether.exe \) | head -n1)
+          test -n "$F"
+          cp "$F" internal/bundle/bin/
+          chmod +x internal/bundle/bin/aether* || true
+
+      - name: Build Club Connect (helper programs from internal/bundle/bin are embedded)
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+        run: |
+          EXT=""; [ "$GOOS" = "windows" ] && EXT=".exe"
+          echo "embedded helpers:"; ls -la internal/bundle/bin
+          go build -trimpath -ldflags "-s -w -X main.Version=$VERSION" -o pkg/clubconnect$EXT .
+          ls -la pkg/clubconnect$EXT
 
       - name: Add tor (Linux x86_64 from apt)
         if: matrix.name == 'linux-amd64'
@@ -102,27 +128,6 @@ jobs:
           mkdir -p /tmp/torb && tar -xzf /tmp/tor.tgz -C /tmp/torb
           find /tmp/torb -type f \( -name 'tor' -o -name 'tor.exe' -o -name '*.dll' \) -exec cp {} pkg/ \;
 
-      - name: Add Aether (MASQUE, gool, mim, noize - the extra WARP variants)
-        # Downloads the published Aether release for this platform and puts the binary next to
-        # clubconnect. Set a repository variable AETHER_VERSION (for example v2.4.0) to pin one;
-        # otherwise the latest release is used. Without it clubconnect still works: only the
-        # built-in WireGuard variant is available.
-        if: matrix.aether != ''
-        continue-on-error: true
-        run: |
-          V="${{ vars.AETHER_VERSION }}"
-          if [ -n "$V" ]; then URL="https://github.com/CluvexStudio/Aether/releases/download/$V/${{ matrix.aether }}"; else URL="https://github.com/CluvexStudio/Aether/releases/latest/download/${{ matrix.aether }}"; fi
-          curl -fsSL -o /tmp/aether.pkg "$URL"
-          mkdir -p /tmp/aether-x
-          case "${{ matrix.aether }}" in
-            *.zip) unzip -q -o /tmp/aether.pkg -d /tmp/aether-x ;;
-            *) tar -xzf /tmp/aether.pkg -C /tmp/aether-x ;;
-          esac
-          F=$(find /tmp/aether-x -type f \( -name aether -o -name aether.exe \) | head -n1)
-          test -n "$F"
-          cp "$F" pkg/
-          chmod +x pkg/aether* || true
-
       - name: Package
         run: |
           cp config.example.json README.md pkg/
@@ -143,10 +148,13 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           pattern: clubconnect-*
           merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
+          name: Club Connect v${{ env.VERSION }}
+          body_path: RELEASE_NOTES.md
           files: clubconnect-v*.zip
